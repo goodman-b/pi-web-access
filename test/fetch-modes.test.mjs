@@ -135,7 +135,16 @@ test("raw mode returns textual non-2xx bodies but rejects images", async () => {
 
 	const image = await extractContent("https://example.com/pixel.png", undefined, { mode: "raw", lookup });
 	assert.match(image.error, /Unsupported content type in raw mode: image\/png/);
+	assert.doesNotMatch(image.error, /retry without mode/);
 	assert.equal(image.thumbnail, undefined);
+});
+
+test("raw mode rejects PDF bodies with a hint toward Markdown extraction", async () => {
+	globalThis.fetch = async () => new Response("%PDF-1.4 junk", { headers: { "content-type": "application/pdf" } });
+
+	const result = await extractContent("https://example.com/compatibility_list_AMD", undefined, { mode: "raw", lookup });
+	assert.match(result.error, /Unsupported content type in raw mode: application\/pdf/);
+	assert.match(result.error, /raw mode does not decode PDFs; retry without mode .*mode "answer"/);
 });
 
 test("raw mode keeps data URIs in the exact HTTP body", async () => {
