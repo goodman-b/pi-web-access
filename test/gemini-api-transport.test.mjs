@@ -168,3 +168,80 @@ test("Gemini video upload, status, and delete respect a configured geminiBaseUrl
 		assert.equal(request.url.includes("generativelanguage.googleapis.com"), false);
 	}
 });
+
+// The relay test above mocks an upload URL on the relay's own origin. Real Gemini answers the
+// resumable-upload start with a URL on generativelanguage.googleapis.com, so a naive client PUTs
+// the bytes past the relay (unbilled but unlogged) and hands the relay credential to Google.
+// The gateway base URL also carries a path prefix (/genai_passthrough), which must survive.
+test("Gemini video upload re-origins a provider-returned upload URL at the gateway, prefix kept", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-web-access-gemini-upload-rewrite-"));
+	const mediaPath = join(root, "synthetic.webm");
+	await writeFile(mediaPath, "synthetic media", "utf8");
+	await writeFile(join(root, "web-search.json"), JSON.stringify({
+		geminiApiKey: "synthetic-gemini-key",
+		geminiBaseUrl: "https://gateway.example.com/genai_passthrough",
+	}) + "\n", "utf8");
+
+	const child = runChild(`
+		const requests = [];
+		globalThis.fetch = async (url, init = {}) => {
+			const request = {
+				url: String(url),
+				method: init.method ?? "GET",
+				headers: Object.fromEntries(new Headers(init.headers)),
+			};
+			requests.push(request);
+			if (request.url.endsWith("/upload/v1beta/files")) {
+				return new Response("", {
+					status: 200,
+					headers: { "x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=synthetic&upload_protocol=resumable" },
+				});
+			}
+			if (request.url.includes("upload_id=synthetic")) {
+				return new Response(JSON.stringify({ file: { name: "files/synthetic", uri: "files/synthetic" } }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (request.url.endsWith("/v1beta/files/synthetic") && request.method === "GET") {
+				return new Response(JSON.stringify({ state: "ACTIVE" }), { status: 200, headers: { "content-type": "application/json" } });
+			}
+			if (request.url.includes(":generateContent")) {
+				return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "# Gateway video" }] } }] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (request.url.endsWith("/v1beta/files/synthetic") && request.method === "DELETE") {
+				return new Response("", { status: 204 });
+			}
+			throw new Error("Unexpected fetch: " + request.url);
+		};
+
+		const { extractVideo } = await import(${JSON.stringify(videoModuleUrl)});
+		const result = await extractVideo({
+			absolutePath: ${JSON.stringify(mediaPath)},
+			mimeType: "video/webm",
+			sizeBytes: 15,
+			maxSizeBytes: 50 * 1024 * 1024,
+			withinUploadLimit: true,
+		});
+		await new Promise(resolve => setImmediate(resolve));
+		console.log(JSON.stringify({ result, requests }));
+	`, {
+		HOME: root,
+		USERPROFILE: root,
+		PI_CODING_AGENT_DIR: root,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.equal(output.result.content, "# Gateway video");
+	const put = output.requests.find(request => request.method === "PUT");
+	assert.ok(put, "no upload PUT recorded");
+	assert.equal(put.url, "https://gateway.example.com/genai_passthrough/upload/v1beta/files?upload_id=synthetic&upload_protocol=resumable");
+	for (const request of output.requests) {
+		assert.equal(request.url.includes("generativelanguage.googleapis.com"), false, request.url);
+		assert.equal(request.headers["x-goog-api-key"], "synthetic-gemini-key");
+	}
+});
