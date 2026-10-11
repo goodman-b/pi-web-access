@@ -10,7 +10,7 @@
  * the self-hosted Firecrawl/Crawl4AI providers.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { loadSsrfConfig, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
+import { fetchRemoteUrl, loadSsrfConfig, type Lookup } from "./ssrf-protection.ts";
 import { getWebSearchConfigPath, isLoopbackHostname } from "./utils.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -112,13 +112,44 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-async function readJson(response: Response): Promise<Record<string, unknown>> {
-	const buffer = await response.arrayBuffer();
-	if (buffer.byteLength > MAX_RESPONSE_BYTES) {
-		throw new Error("PDF parser endpoint returned an oversized response");
+/**
+ * Read at most `maxBytes` of the response body, cancelling the stream past
+ * the cap so a runaway parser cannot exhaust memory before we notice.
+ * `overflowThrows` distinguishes the JSON path (oversized is an error) from
+ * the error-preview path (an oversized body is still worth its prefix).
+ */
+async function readCapped(response: Response, maxBytes: number, overflowThrows: boolean): Promise<string> {
+	const body = response.body;
+	if (!body) return "";
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	let received = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		received += value.byteLength;
+		if (received > maxBytes) {
+			await reader.cancel();
+			if (overflowThrows) {
+				throw new Error("PDF parser endpoint returned an oversized response");
+			}
+			return text;
+		}
+		text += decoder.decode(value, { stream: true });
+		if (!overflowThrows && text.length >= maxBytes) {
+			// preview path: the prefix is all we need, stop reading early
+			await reader.cancel();
+			return text;
+		}
 	}
+	return text + decoder.decode();
+}
+
+async function readJson(response: Response): Promise<Record<string, unknown>> {
+	const text = await readCapped(response, MAX_RESPONSE_BYTES, true);
 	try {
-		const parsed = JSON.parse(new TextDecoder().decode(buffer)) as unknown;
+		const parsed = JSON.parse(text) as unknown;
 		if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
 	} catch {
 		// fall through to the shared error below
@@ -128,7 +159,7 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 
 async function errorBody(response: Response): Promise<string> {
 	try {
-		const text = (await response.text()).slice(0, MAX_ERROR_BODY_BYTES);
+		const text = (await readCapped(response, MAX_ERROR_BODY_BYTES, false)).slice(0, MAX_ERROR_BODY_BYTES);
 		return text ? `: ${text}` : "";
 	} catch {
 		return "";
@@ -144,15 +175,17 @@ export function stripNullCharacters(markdown: string): string {
 }
 
 function markdownResult(payload: Record<string, unknown>): EndpointPDFExtractResult {
-	const markdown = payload.markdown;
-	if (typeof markdown !== "string" || markdown.trim().length === 0) {
+	// Strip NULs before the emptiness check: output that is only NUL bytes is
+	// an empty conversion, and must fail so the provider chain can fall back.
+	const markdown = typeof payload.markdown === "string" ? stripNullCharacters(payload.markdown) : "";
+	if (markdown.trim().length === 0) {
 		const error = normalizeString(payload.error);
 		throw new Error(
 			error ? `PDF parser endpoint failed: ${error}` : "PDF parser endpoint returned no markdown",
 		);
 	}
 	const pages = typeof payload.pages === "number" ? payload.pages : undefined;
-	return { markdown: stripNullCharacters(markdown), ...(pages !== undefined ? { pages } : {}) };
+	return { markdown, ...(pages !== undefined ? { pages } : {}) };
 }
 
 /**
@@ -177,28 +210,31 @@ export async function extractPDFViaEndpoint(
 	const ssrf = loadSsrfConfig();
 	// A parser URL is user-configured, exactly like firecrawlBaseUrl, so a
 	// loopback host is allowed; private/LAN ranges still need ssrf.allowRanges.
-	const validated = await validateRemoteUrl(endpointUrl, {
+	// fetchRemoteUrl re-validates every redirect hop, so the parser cannot
+	// bounce the PDF onto a host the policy blocks.
+	const guard = {
 		allowRanges: ssrf.allowRanges,
 		trustEnvProxy: ssrf.trustEnvProxy,
 		allowLoopback: isLoopbackHostname(new URL(endpointUrl).hostname),
 		...(options.lookup ? { lookup: options.lookup } : {}),
-	});
+	};
 
 	const engine = getEndpointEngine();
 	const form = new FormData();
 	form.append("file", new Blob([buffer], { type: "application/pdf" }), "document.pdf");
 	if (engine) form.append("engine", engine);
+	form.append("max_pages", String(options.maxPages));
 
 	const deadline = Date.now() + (options.timeoutMs ?? getEndpointTimeoutMs());
 	const signal = options.signal;
 	const timeout = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
 	const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
-	const response = await fetch(validated.toString(), {
-		method: "POST",
-		body: form,
-		signal: combined,
-	});
+	const response = await fetchRemoteUrl(
+		endpointUrl,
+		{ method: "POST", body: form, signal: combined },
+		guard,
+	);
 	if (!response.ok) {
 		throw new Error(
 			`PDF parser endpoint returned HTTP ${response.status}${await errorBody(response)}`,
@@ -211,7 +247,7 @@ export async function extractPDFViaEndpoint(
 	}
 
 	const jobId = normalizeString(payload.job_id)!;
-	const jobsUrl = new URL(`jobs/${encodeURIComponent(jobId)}`, validated).toString();
+	const jobsUrl = new URL(`jobs/${encodeURIComponent(jobId)}`, endpointUrl).toString();
 	let interval = 1_000;
 	while (Date.now() < deadline) {
 		const remaining = deadline - Date.now();
@@ -219,15 +255,23 @@ export async function extractPDFViaEndpoint(
 		const wait = Math.min(interval, Math.max(1, remaining), MAX_POLL_INTERVAL_MS);
 		interval = Math.min(interval * 2, MAX_POLL_INTERVAL_MS);
 		await new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(resolve, wait);
+			const timer = setTimeout(() => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			}, wait);
 			const onAbort = () => {
 				clearTimeout(timer);
 				reject(new Error("PDF endpoint poll aborted"));
 			};
-			if (signal) signal.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) {
+				clearTimeout(timer);
+				reject(new Error("PDF endpoint poll aborted"));
+				return;
+			}
+			signal?.addEventListener("abort", onAbort, { once: true });
 		});
 
-		const poll = await fetch(jobsUrl, { signal: combined });
+		const poll = await fetchRemoteUrl(jobsUrl, { signal: combined }, guard);
 		if (!poll.ok) {
 			throw new Error(
 				`PDF parser job status returned HTTP ${poll.status}${await errorBody(poll)}`,
@@ -242,13 +286,18 @@ export async function extractPDFViaEndpoint(
 		if (status === "done") {
 			const result = payload.result;
 			if (typeof result === "string") {
+				let parsed: unknown;
 				try {
-					const parsed = JSON.parse(result) as unknown;
-					if (parsed && typeof parsed === "object") return markdownResult(parsed as Record<string, unknown>);
+					parsed = JSON.parse(result);
 				} catch {
+					// Only a genuinely non-JSON body is treated as raw markdown;
+					// malformed job payloads must fail so the chain falls back.
 					return { markdown: stripNullCharacters(result) };
 				}
-				return markdownResult({});
+				if (parsed && typeof parsed === "object") {
+					return markdownResult(parsed as Record<string, unknown>);
+				}
+				throw new Error("PDF parser endpoint job completed without a result");
 			}
 			if (result && typeof result === "object") {
 				return markdownResult(result as Record<string, unknown>);

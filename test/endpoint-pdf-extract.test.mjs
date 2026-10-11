@@ -74,8 +74,56 @@ test("extractPDFViaEndpoint posts the PDF as multipart file and returns markdown
 	const file = calls[0].init.body.get("file");
 	assert.ok(file, "multipart body did not carry a file field");
 	assert.equal(file.type, "application/pdf");
+	// the page cap travels to the parser as its own form field, as with Datalab
+	assert.equal(calls[0].init.body.get("max_pages"), "10");
 	// broken-encoding NUL bytes are stripped from parser output
 	assert.equal(result.markdown, "# Parsed\n\nmarkdown body");
+});
+
+test("extractPDFViaEndpoint refuses redirects from the parser onto blocked hosts", async () => {
+	process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-endpoint-pdf-"));
+	useEndpoint("http://parser.test/parse");
+	globalThis.fetch = async (url) => {
+		if (String(url) === "http://parser.test/parse") {
+			return new Response(null, { status: 307, headers: { location: "http://pivot.internal/parse" } });
+		}
+		throw new Error(`redirect target must never be fetched: ${url}`);
+	};
+	const lookup = async (hostname) =>
+		hostname === "parser.test"
+			? [{ address: "93.184.216.34", family: 4 }]
+			: [{ address: "10.0.0.5", family: 4 }];
+	await assert.rejects(
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 10, title: "Doc", lookup }),
+		/Blocked internal address/i,
+	);
+});
+
+test("extractPDFViaEndpoint cancels oversized JSON responses while streaming", async () => {
+	process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-endpoint-pdf-"));
+	useEndpoint("http://parser.test/parse");
+	let cancelled = false;
+	globalThis.fetch = async () => {
+		const chunk = new Uint8Array(8 * 1024 * 1024);
+		let sent = 0;
+		return new Response(
+			new ReadableStream({
+				pull(controller) {
+					if (sent++ >= 4) return controller.close();
+					controller.enqueue(chunk);
+				},
+				cancel() {
+					cancelled = true;
+				},
+			}),
+			{ status: 200, headers: { "content-type": "application/json" } },
+		);
+	};
+	await assert.rejects(
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 10, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		/oversized response/i,
+	);
+	assert.ok(cancelled, "response body was not cancelled at the size cap");
 });
 
 test("extractPDFViaEndpoint polls job responses until done", async () => {
@@ -127,6 +175,60 @@ test("extractPDFViaEndpoint reports endpoint errors and failed jobs", async () =
 		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
 		/HTTP 500.*llama-server binary not found/s,
 	);
+});
+
+test("malformed job results fail so the provider chain can fall back", async () => {
+	process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-endpoint-pdf-"));
+	useEndpoint("http://parser.test/parse");
+	const respond = (result) => async (url) => {
+		if (!String(url).includes("/jobs/")) {
+			return new Response(JSON.stringify({ job_id: "j1" }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ status: "done", result }), { status: 200 });
+	};
+	// a JSON-string result carrying an empty markdown field is a parser error,
+	// NOT raw markdown to save
+	globalThis.fetch = respond(JSON.stringify({ markdown: "" }));
+	await assert.rejects(
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		/returned no markdown/i,
+	);
+	// genuinely non-JSON result strings remain raw markdown
+	globalThis.fetch = respond("# plain markdown");
+	const raw = await extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC });
+	assert.equal(raw.markdown, "# plain markdown");
+});
+
+test("parser output that is only NUL bytes fails instead of saving empty text", async () => {
+	process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-endpoint-pdf-"));
+	useEndpoint("http://parser.test/parse");
+	globalThis.fetch = async () =>
+		new Response(JSON.stringify({ markdown: "\x00\x00\x00" }), { status: 200 });
+	await assert.rejects(
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		/returned no markdown/i,
+	);
+});
+
+test("extractPDFViaEndpoint aborts poll waits on caller cancellation", async () => {
+	process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-endpoint-pdf-"));
+	useEndpoint("http://parser.test/parse");
+	const controller = new AbortController();
+	globalThis.fetch = async (url) => {
+		if (!String(url).includes("/jobs/")) {
+			return new Response(JSON.stringify({ job_id: "slow" }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ status: "queued" }), { status: 200 });
+	};
+	const pending = extractPDFViaEndpoint(PDF_BYTES, {
+		maxPages: 1,
+		title: "Doc",
+		timeoutMs: 60_000,
+		signal: controller.signal,
+		lookup: LOOKUP_PUBLIC,
+	});
+	setTimeout(() => controller.abort(), 50);
+	await assert.rejects(pending, /poll aborted/i);
 });
 
 test("extractPDFViaEndpoint refuses parser hosts outside the SSRF policy", async () => {
