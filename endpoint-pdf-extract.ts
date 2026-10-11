@@ -139,6 +139,11 @@ async function readCapped(response: Response, maxBytes: number, overflowThrows: 
 			return text + decoder.decode(value.subarray(0, room), { stream: true });
 		}
 		text += decoder.decode(value, { stream: true });
+		// A complete preview must not wait on a parser that stalls after sending it.
+		if (!overflowThrows && received === maxBytes) {
+			await reader.cancel();
+			return text + decoder.decode();
+		}
 	}
 	return text + decoder.decode();
 }

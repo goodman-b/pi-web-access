@@ -179,6 +179,15 @@ test("extractPDFViaEndpoint reports endpoint errors and failed jobs", async () =
 		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC }),
 		/HTTP 502: upstream parser crashed: x+$/,
 	);
+	// an error body that fills the preview exactly and then stalls still fails fast
+	globalThis.fetch = async () => new Response(
+		new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(`stalled: ${"y".repeat(291)}`)); } }),
+		{ status: 502 },
+	);
+	await assert.rejects(
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC, timeoutMs: 2_000 }),
+		/HTTP 502: stalled: y+$/,
+	);
 });
 
 test("malformed job results fail so the provider chain can fall back", async () => {
