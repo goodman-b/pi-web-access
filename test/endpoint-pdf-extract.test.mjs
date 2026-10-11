@@ -8,6 +8,10 @@ const originalFetch = globalThis.fetch;
 const originalUrl = process.env.PDF_ENDPOINT_URL;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
+// Isolate before import: the module resolves its config path at import time,
+// so a developer machine's real web-search.json must not leak into any case.
+process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-endpoint-pdf-"));
+
 const {
 	extractPDFViaEndpoint,
 	getEndpointUrl,
