@@ -332,15 +332,33 @@ Requires `ffmpeg` (and `yt-dlp` for YouTube). Timestamps accept `H:MM:SS`, `MM:S
 
 With `mode: "answer"`, the answer model receives the extracted PDF Markdown rather than the saved-file notice. The Markdown file is still saved, and the original extracted content remains available through `get_search_content`; ordinary readable-mode PDF fetches continue to return the file path.
 
-PDF URLs are converted to Markdown and saved under the temporary `pi-web-pdf` directory by default so the agent can `read` specific sections without loading the full document into context. Three engines are available, selected with `pdf.provider` (`"auto"` is the default):
+PDF URLs are converted to Markdown and saved under the temporary `pi-web-pdf` directory by default so the agent can `read` specific sections without loading the full document into context. Four engines are available, selected with `pdf.provider` (`"auto"` is the default):
 
 | Provider | Engine | Trade-offs |
 | --- | --- | --- |
+| `endpoint` | Self-hosted parser endpoint (POST the PDF, get Markdown) | Layout-aware conversion (marker/pdf-OCR pipelines) on hardware you run — no key, no per-page cost, no cloud egress; requires `pdf.endpointUrl` and an SSRF allowlist entry for a private host |
 | `datalab` | Datalab hosted conversion (Marker) | Deterministic layout-aware output — tables, multi-column reading order, headings, math; `accurate` mode handles scanned pages; may return a `parse_quality_score`; requires a Datalab key, billed per page with a free monthly credit |
 | `gemini` | Gemini API (vision LLM) | Best on scanned/complex pages; LLM transcription can occasionally drift or truncate; requires a Gemini key |
 | `unpdf` | Local pdf.js text extraction | Free, offline, no key; flattened text only — no layout, no tables, no OCR |
 
-`auto` order: Datalab (when a key is configured) → Gemini (when a key is configured) → local `unpdf`. Datalab runs first for layout-aware conversion. If its request fails — including after free-tier credit is exhausted — the chain continues to Gemini, then `unpdf`, automatically. Setting `pdf.provider` to `gemini`, `datalab`, or `unpdf` pins that engine and skips the other remote tiers (an explicit engine still falls back to `unpdf` when it errors, except for credential/config errors and caller cancellation). No Datalab key means the `datalab` tier is simply skipped — behavior is unchanged for existing users.
+`auto` order: self-hosted endpoint (when `pdf.endpointUrl` is configured) → Datalab (when a key is configured) → Gemini (when a key is configured) → local `unpdf`. The endpoint runs first because it is both local and deterministic. If its request fails — parser down, engine error, timeout — the chain continues to Datalab, then Gemini, then `unpdf`, automatically. Setting `pdf.provider` to `endpoint`, `gemini`, `datalab`, or `unpdf` pins that engine and skips the other remote tiers (an explicit engine still falls back to `unpdf` when it errors, except for credential/config errors and caller cancellation). No Datalab key means the `datalab` tier is simply skipped — behavior is unchanged for existing users, and an unconfigured endpoint tier is skipped the same way.
+
+**Self-hosted parser endpoint.** Point `pdf.endpointUrl` at a document-parsing service and PDFs are converted on your own hardware. The request shape is the common one for appliance-style services (doc-tools, marker HTTP wrappers, surya/served OCR pipelines): `multipart/form-data` with a `file` field (plus `engine` when `pdf.endpointEngine` is set), answering `{ "markdown": "…" }`. Services that queue large documents instead — answering `{ "job_id": "…" }` — are supported too: the provider polls `GET <base>/jobs/{id}` until the job reports `done` (result as an object or a JSON string), `error`, or `pdf.endpointTimeoutMs` elapses. NUL bytes that broken PDF text-layer encodings leak into parser output are stripped.
+
+```jsonc
+// ~/.pi/agent/web-search.json — local marker on a LAN appliance
+{
+  "ssrf": { "allowRanges": ["192.168.50.0/24"] },
+  "pdf": {
+    "provider": "auto",
+    "endpointUrl": "http://192.168.50.48:8070/parse",
+    "endpointEngine": "marker",   // optional extra form field
+    "endpointTimeoutMs": 120000   // default 120s, capped at 600s
+  }
+}
+```
+
+The URL passes the same SSRF guard as every other fetch: a private or LAN host needs its range in `ssrf.allowRanges` (loopback is allowed, as for `firecrawlBaseUrl` and `crawl4aiBaseUrl`), so a mistyped URL cannot quietly ship your PDFs somewhere else. Env var: `PDF_ENDPOINT_URL` overrides `pdf.endpointUrl`.
 
 **Why Datalab.** The hosted converter uses a dedicated extraction engine (Marker) intended to retain document structure such as tables, multi-column reading order, headings, links, and math, where local `unpdf` extraction only yields flattened text. It is deterministic rather than LLM-based. Completed responses may include a `parse_quality_score` (0–5) for optional quality gating. Pricing is per processed page: **fast / balanced** $4 / 1,000 pages; **accurate** $10 / 1,000 pages. The free tier gives a **$10 monthly credit** (personal email; $20 with a work email) at **25 requests/minute** — roughly **2,500 pages/month free in `fast` mode** or 1,000 in `accurate` mode. Processing defaults to the **US region**. EU data residency uses **1.25× usage**; opt in with `DATALAB_PROCESSING_LOCATION=eu`.
 
@@ -365,7 +383,7 @@ Env vars: `DATALAB_API_KEY` (or `datalabApiKey` in config), `DATALAB_PROCESSING_
 
 ### Blocked pages
 
-Raw and direct-image HTTP requests use the same SSRF validation, hostname domain policy, redirect checks, timeout, and 5MB streamed response bound as normal extraction. Raw mode returns textual bodies even for non-2xx responses and exposes the HTTP status in tool details; it does not run readability or hosted extraction fallbacks.
+Raw and direct-image HTTP requests use the same SSRF validation, hostname domain policy, redirect checks, timeout, and 5MB streamed response bound as normal extraction. Raw mode returns textual bodies even for non-2xx responses and exposes the HTTP status in tool details; it does not run readability or hosted extraction fallbacks. Non-textual bodies are rejected — for PDFs the error names the alternative (omit `mode` for Markdown extraction, or `mode: "answer"` with a prompt).
 
 `fetch_content` can opt into local browser-cookie auth with `auth: "profile"`, or `auth: true` when exactly one `authFetch` profile exists. Configure profiles in `~/.pi/agent/web-search.json`, for example `{ "authFetch": { "social": ["x.com", "instagram.com"], "work": { "hosts": ["docs.company.com"], "chromeProfile": "Profile 2", "cache": "off" } } }`. Auth fetch uses only the local direct HTTP path, requires HTTPS, allows only configured hosts and their subdomains, refuses cross-origin redirects, and never sends cookies or authenticated content to hosted extraction providers. Browser cookie extraction remains opt-in through `allowBrowserCookies: true` or `PI_ALLOW_BROWSER_COOKIES=1`.
 
@@ -1073,7 +1091,7 @@ Values use the same format as pi keybindings (e.g. `ctrl+s`, `ctrl+shift+s`, `al
 
 Set `"enabled": false` under `tools`, `commands`, `image`, or `pdf` to disable that feature. Tool-specific settings override the legacy `webSearch.enabled` shorthand; without an override, it still disables `web_search` and `source_check`. `image.enabled: false` blocks direct image fetches and video frame extraction, and prevents video thumbnails. `pdf.enabled: false` blocks PDF extraction. For GitHub specifically, `githubClone.enabled: false` only skips clone/API specialization, and `githubPrIssue.enabled: false` only skips PR/issue specialization; neither setting unregisters `fetch_content` or blocks generic URL extraction. Pi restart is required for tool and command registration changes.
 
-Rate limits: Perplexity is capped at 10 requests/minute (client-side). Jina Search, TinyFish, Search1API, and Searchinfinity apply the plan limits documented by their APIs. Querit Search and Contents subscriptions are independent. Content fetches run 3 concurrent; direct HTTP fetches and Jina Reader use a 30s timeout by default, configurable together with `fetch.timeout` in seconds. Remote extraction fallbacks carry their own budgets and are not covered by that setting: Firecrawl 60s, Crawl4AI 60s, Kagi Extract 60s, Ollama Web Fetch 60s, Bright Data Web Unlocker 60s, TinyFish up to 150s, Gemini 120s, Datalab 120s (capped at 300s, rate-limited to 25 requests/minute on the free tier). `pdf.maxSizeMB` defaults to 20 and is capped at 50. `pdf.maxPages` defaults to 100 and limits every PDF provider to the first N pages.
+Rate limits: Perplexity is capped at 10 requests/minute (client-side). Jina Search, TinyFish, Search1API, and Searchinfinity apply the plan limits documented by their APIs. Querit Search and Contents subscriptions are independent. Content fetches run 3 concurrent; direct HTTP fetches and Jina Reader use a 30s timeout by default, configurable together with `fetch.timeout` in seconds. Remote extraction fallbacks carry their own budgets and are not covered by that setting: Firecrawl 60s, Crawl4AI 60s, Kagi Extract 60s, Ollama Web Fetch 60s, Bright Data Web Unlocker 60s, TinyFish up to 150s, Gemini 120s, Datalab 120s (capped at 300s, rate-limited to 25 requests/minute on the free tier), self-hosted PDF endpoint 120s (capped at 600s). `pdf.maxSizeMB` defaults to 20 and is capped at 50. `pdf.maxPages` defaults to 100 and limits every PDF provider to the first N pages.
 
 ## Limitations
 

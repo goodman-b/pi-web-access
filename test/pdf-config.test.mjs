@@ -48,6 +48,7 @@ test("pdf.provider defaults to auto and validates explicit providers", () => {
 		"datalab",
 	);
 	assert.equal(readConfig({ pdf: { provider: "unpdf" } }).provider, "unpdf");
+	assert.equal(readConfig({ pdf: { provider: "endpoint" } }).provider, "endpoint");
 	assert.equal(readConfig({ pdf: { provider: "gemini2" } }).provider, "auto");
 });
 
