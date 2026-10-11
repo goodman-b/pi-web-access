@@ -341,9 +341,13 @@ async function writeMarkdownResult(options: {
 	lines.push(`# ${options.title}`);
 	lines.push("");
 	lines.push(`> Source: ${options.url}`);
-	lines.push(
-		`> Pages: ${options.pages}${options.truncated ? ` (extracted first ${options.pagesToExtract})` : ""}`,
-	);
+	// Providers that report no page count (parser endpoints, LLM output
+	// without page markers) omit the line rather than claiming zero pages.
+	if (options.pages > 0) {
+		lines.push(
+			`> Pages: ${options.pages}${options.truncated ? ` (extracted first ${options.pagesToExtract})` : ""}`,
+		);
+	}
 	if (options.metaAuthor) lines.push(`> Author: ${options.metaAuthor}`);
 	lines.push("");
 	lines.push("---");
