@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- PDFs can be converted by a document parser you run yourself. Set `pdf.provider: "endpoint"` and `pdf.endpointUrl`, and `fetch_content` sends the PDF to that service and uses the Markdown it returns, with no API key or per-page cost. In `auto`, a configured endpoint is tried before Datalab, Gemini and the built-in parser, and a failed request falls back to them. The URL passes the same SSRF checks as other fetches, so a LAN host needs its range in `ssrf.allowRanges`. Thanks to [@goodman-b](https://github.com/goodman-b) for [PR #553](https://github.com/nicobailon/pi-web-access/pull/553).
+
 ### Changed
 
 - Search summaries now show the summary model each source's snippet, not just its title and URL, so providers that return ranked results without an answer get a summary of what the pages say. Snippets are capped per source and per query (600 and 12,000 characters, or 200 and 3,000 when the provider already gave an answer) to keep summaries within their deadline. Thanks to [@axelbaumlisto](https://github.com/axelbaumlisto) for [PR #547](https://github.com/nicobailon/pi-web-access/pull/547).
