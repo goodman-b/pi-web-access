@@ -15,13 +15,12 @@ import { getWebSearchConfigPath, isLoopbackHostname } from "./utils.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_POLL_INTERVAL_MS = 3_000;
-const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 300;
 const CONFIG_PATH = getWebSearchConfigPath();
 
 export interface EndpointPDFExtractOptions {
 	maxPages: number;
-	title: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	lookup?: Lookup;
@@ -93,7 +92,7 @@ export function getEndpointEngine(): string | null {
 export function getEndpointTimeoutMs(): number {
 	const configured = pdfSection().endpointTimeoutMs;
 	if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
-		return Math.min(configured, 600_000);
+		return Math.min(configured, 300_000);
 	}
 	return DEFAULT_TIMEOUT_MS;
 }
@@ -128,20 +127,18 @@ async function readCapped(response: Response, maxBytes: number, overflowThrows: 
 	for (;;) {
 		const { done, value } = await reader.read();
 		if (done) break;
+		const room = maxBytes - received;
 		received += value.byteLength;
 		if (received > maxBytes) {
 			await reader.cancel();
 			if (overflowThrows) {
 				throw new Error("PDF parser endpoint returned an oversized response");
 			}
-			return text;
+			// Keep the allowed prefix of the chunk that crosses the cap: a
+			// single-chunk error body would otherwise yield no preview at all.
+			return text + decoder.decode(value.subarray(0, room), { stream: true });
 		}
 		text += decoder.decode(value, { stream: true });
-		if (!overflowThrows && text.length >= maxBytes) {
-			// preview path: the prefix is all we need, stop reading early
-			await reader.cancel();
-			return text;
-		}
 	}
 	return text + decoder.decode();
 }

@@ -63,7 +63,6 @@ test("extractPDFViaEndpoint posts the PDF as multipart file and returns markdown
 
 	const result = await extractPDFViaEndpoint(PDF_BYTES, {
 		maxPages: 10,
-		title: "Doc",
 		lookup: LOOKUP_PUBLIC,
 	});
 
@@ -94,7 +93,7 @@ test("extractPDFViaEndpoint refuses redirects from the parser onto blocked hosts
 			? [{ address: "93.184.216.34", family: 4 }]
 			: [{ address: "10.0.0.5", family: 4 }];
 	await assert.rejects(
-		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 10, title: "Doc", lookup }),
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 10, lookup }),
 		/Blocked internal address/i,
 	);
 });
@@ -120,7 +119,7 @@ test("extractPDFViaEndpoint cancels oversized JSON responses while streaming", a
 		);
 	};
 	await assert.rejects(
-		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 10, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 10, lookup: LOOKUP_PUBLIC }),
 		/oversized response/i,
 	);
 	assert.ok(cancelled, "response body was not cancelled at the size cap");
@@ -152,7 +151,6 @@ test("extractPDFViaEndpoint polls job responses until done", async () => {
 
 	const result = await extractPDFViaEndpoint(PDF_BYTES, {
 		maxPages: 10,
-		title: "Doc",
 		timeoutMs: 15_000,
 		lookup: LOOKUP_PUBLIC,
 	});
@@ -172,8 +170,14 @@ test("extractPDFViaEndpoint reports endpoint errors and failed jobs", async () =
 			headers: { "content-type": "application/json" },
 		});
 	await assert.rejects(
-		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC }),
 		/HTTP 500.*llama-server binary not found/s,
+	);
+	// an error body larger than the preview cap, sent as one chunk, keeps its prefix
+	globalThis.fetch = async () => new Response(`upstream parser crashed: ${"x".repeat(600)}`, { status: 502 });
+	await assert.rejects(
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC }),
+		/HTTP 502: upstream parser crashed: x+$/,
 	);
 });
 
@@ -190,12 +194,12 @@ test("malformed job results fail so the provider chain can fall back", async () 
 	// NOT raw markdown to save
 	globalThis.fetch = respond(JSON.stringify({ markdown: "" }));
 	await assert.rejects(
-		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC }),
 		/returned no markdown/i,
 	);
 	// genuinely non-JSON result strings remain raw markdown
 	globalThis.fetch = respond("# plain markdown");
-	const raw = await extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC });
+	const raw = await extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC });
 	assert.equal(raw.markdown, "# plain markdown");
 });
 
@@ -205,7 +209,7 @@ test("parser output that is only NUL bytes fails instead of saving empty text", 
 	globalThis.fetch = async () =>
 		new Response(JSON.stringify({ markdown: "\x00\x00\x00" }), { status: 200 });
 	await assert.rejects(
-		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC }),
 		/returned no markdown/i,
 	);
 });
@@ -222,7 +226,6 @@ test("extractPDFViaEndpoint aborts poll waits on caller cancellation", async () 
 	};
 	const pending = extractPDFViaEndpoint(PDF_BYTES, {
 		maxPages: 1,
-		title: "Doc",
 		timeoutMs: 60_000,
 		signal: controller.signal,
 		lookup: LOOKUP_PUBLIC,
@@ -238,7 +241,7 @@ test("extractPDFViaEndpoint refuses parser hosts outside the SSRF policy", async
 		throw new Error("fetch must not be attempted");
 	};
 	await assert.rejects(
-		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, title: "Doc", lookup: LOOKUP_PUBLIC }),
+		extractPDFViaEndpoint(PDF_BYTES, { maxPages: 1, lookup: LOOKUP_PUBLIC }),
 		/Blocked internal address/i,
 	);
 });

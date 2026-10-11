@@ -200,7 +200,6 @@ export async function extractPDFToMarkdown(
 			if (isEndpointApiAvailable()) {
 				const result = await extractPDFViaEndpoint(buffer, {
 					maxPages: safeMaxPages,
-					title: urlTitle,
 					timeoutMs: getEndpointTimeoutMs(),
 					...(signal ? { signal } : {}),
 				});
@@ -212,7 +211,7 @@ export async function extractPDFToMarkdown(
 					filename,
 					url,
 				});
-				}
+			}
 		} catch (err) {
 			if (shouldRethrowExtractionError(err, signal)) throw err;
 		}
