@@ -983,7 +983,10 @@ export function createWebToolCore(host: WebToolCoreHost): WebToolCoreInstance {
 			const presentedResults = mode === "answer"
 				? await Promise.all(fetchResults.map(async result => {
 					if (result.error) return result;
-					if (result.thumbnail || result.mimeType?.startsWith("image/")) {
+					// Reject image-as-payload results (direct images, video frames — they
+					// set mimeType and/or frames). A text result that merely attaches a
+					// thumbnail (YouTube analysis) stays answerable.
+					if (result.mimeType?.startsWith("image/") || result.frames?.length) {
 						return { ...result, error: "Page answer requires textual fetched content" };
 					}
 					try {

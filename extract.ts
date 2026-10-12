@@ -674,7 +674,9 @@ export async function extractContent(
 			if ("error" in frame) {
 				return { url, title: `Frame at ${options.timestamp}`, content: frame.error, error: frame.error };
 			}
-			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame };
+			// mimeType marks the image as the payload (like direct-image fetches); a
+			// text result with a bonus thumbnail stays without one.
+			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame, mimeType: frame.mimeType };
 		}
 
 		const localVideo = safeVideoInfo(url);
@@ -703,7 +705,7 @@ export async function extractContent(
 			if ("error" in frame) {
 				return { url, title: `Frame at ${options.timestamp}`, content: frame.error, error: frame.error };
 			}
-			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame };
+			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame, mimeType: frame.mimeType };
 		}
 
 		return { url, title: "", content: "", error: "Timestamp extraction only works with YouTube and local video files" };
