@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - With `geminiBaseUrl` pointing at a gateway, video uploads to the Gemini Files API now send the file bytes through the gateway too. Previously the upload URL Google returned sent the bytes, along with the gateway credential, straight to `generativelanguage.googleapis.com`. Thanks to [@goodman-b](https://github.com/goodman-b) for [PR #561](https://github.com/nicobailon/pi-web-access/pull/561).
+- `fetch_content` answer mode now answers YouTube and local-video analyses that come with a thumbnail, instead of rejecting them with "Page answer requires textual fetched content". Multi-frame results are now refused rather than answered from their "N frames extracted" placeholder. Thanks to [@goodman-b](https://github.com/goodman-b) for [PR #562](https://github.com/nicobailon/pi-web-access/pull/562).
 
 ## [0.39.0] - 2026-10-11
 
