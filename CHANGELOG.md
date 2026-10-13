@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- With `geminiBaseUrl` pointing at a gateway, video uploads to the Gemini Files API now send the file bytes through the gateway too. Previously the upload URL Google returned sent the bytes, along with the gateway credential, straight to `generativelanguage.googleapis.com`. Thanks to [@goodman-b](https://github.com/goodman-b) for [PR #561](https://github.com/nicobailon/pi-web-access/pull/561).
+
 ## [0.39.0] - 2026-10-11
 
 ### Highlights
