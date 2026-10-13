@@ -1,20 +1,29 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, test } from "node:test";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 // A YouTube analysis succeeds as TEXT and attaches the video thumbnail as a
 // bonus. The answer-mode gate must key on the payload (mimeType / frames), not
 // on the mere presence of a thumbnail, or it discards a perfectly good answer.
-const envNames = ["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP", "GEMINI_API_KEY"];
+const envNames = ["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP", "GEMINI_API_KEY", "PATH"];
 const previousEnv = new Map(envNames.map(name => [name, process.env[name]]));
 const originalFetch = globalThis.fetch;
 const root = await mkdtemp(join(tmpdir(), "pi-fetch-youtube-answer-"));
-for (const name of envNames) process.env[name] = root;
+for (const name of ["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP"]) process.env[name] = root;
 delete process.env.GEMINI_API_KEY;
 const configPath = join(root, "web-search.json");
 await writeFile(configPath, JSON.stringify({ geminiApiKey: "synthetic-test-key" }));
+// Frame extraction shells out to yt-dlp and ffmpeg; stub both so frame
+// results are produced without network or installed binaries.
+const binDir = join(root, "bin");
+await mkdir(binDir);
+await writeFile(join(binDir, "yt-dlp"), "#!/bin/sh\nprintf '60\\nhttps://stream.invalid/video\\n'\n");
+await writeFile(join(binDir, "ffmpeg"), "#!/bin/sh\nprintf 'fake-jpeg-bytes'\n");
+await chmod(join(binDir, "yt-dlp"), 0o755);
+await chmod(join(binDir, "ffmpeg"), 0o755);
+process.env.PATH = `${binDir}${delimiter}${process.env.PATH}`;
 
 const { default: initializeExtension } = await import("../index.ts");
 const { clearResults, getResult } = await import("../storage.ts");
@@ -31,18 +40,23 @@ assert.ok(fetchTool);
 
 const TRANSCRIPT = "A young man talks to the camera in front of elephants at the zoo.";
 const ANSWER = "A man describes elephants at a zoo.";
+let answerCalls = 0;
 
 const ctx = {
 	model: { api: "test-api", provider: "test", id: "answer-model", input: ["text"], contextWindow: 10_000 },
 	modelRegistry: {
 		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "synthetic-test-key" }),
-		complete: async () => ({ stopReason: "stop", content: [{ type: "text", text: ANSWER }] }),
+		complete: async () => {
+			answerCalls++;
+			return { stopReason: "stop", content: [{ type: "text", text: ANSWER }] };
+		},
 	},
 	scopedModels: [],
 };
 
 beforeEach(async () => {
 	clearResults();
+	answerCalls = 0;
 	globalThis.fetch = async (input) => {
 		const url = String(input);
 		if (url.includes(":generateContent")) {
@@ -84,18 +98,16 @@ test("answer mode keeps the transcript of a video analysis that attaches a thumb
 	assert.match(stored?.urls?.[0].content ?? "", /elephants at the zoo/);
 });
 
-test("answer mode still rejects a timestamp frame whose payload is an image", async () => {
-	const result = await fetchTool.execute(
-		"test-call",
-		{ url: "https://www.youtube.com/watch?v=jNQXAC9IVRw", mode: "answer", prompt: "What happens?", timestamp: "0:05" },
-		undefined,
-		undefined,
-		ctx,
-	);
-	// Frame extraction needs yt-dlp/ffmpeg; whether it runs or not, the
-	// placeholder text must never be answered from — either the payload is
-	// rejected or the frame path surfaces its own error.
-	const texts = result.content.filter(block => block.type === "text").map(block => block.text);
-	const answered = !result.details.error && texts.some(text => text.includes(ANSWER));
-	assert.ok(!answered, `frame placeholder was answered from: ${texts.join("|")}`);
-});
+for (const [name, params] of [["a single frame", { timestamp: "0:05" }], ["multiple frames", { frames: 2 }]]) {
+	test(`answer mode rejects ${name} instead of answering from its placeholder text`, async () => {
+		const result = await fetchTool.execute(
+			"test-call",
+			{ url: "https://www.youtube.com/watch?v=jNQXAC9IVRw", mode: "answer", prompt: "What happens?", ...params },
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.equal(result.details.error, "Page answer requires textual fetched content");
+		assert.equal(answerCalls, 0);
+	});
+}
